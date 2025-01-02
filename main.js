@@ -1,5 +1,5 @@
 import { Point3D, Satellite, Moon, Rocket } from './models.js';
-import { GeneticAlgorithm } from './genetic-algorithm.js';
+import { AntColonyOptimization } from './ant-colony.js';
 import { SpaceVisualizer } from './visualization.js';
 
 // Hohmann transfer süresini hesapla
@@ -17,18 +17,26 @@ async function main() {
     const visualizer = new SpaceVisualizer(container);
     
     // Problem parametrelerini ayarla
-    const numSatellites = 20;
-    const rocketFuel = 20   0e3; // metre cinsinden
+    const numSatellites = 30;
+    const rocketFuel = 500; // Yakıt birimi (1000 birim)
     
     console.log(`\n${numSatellites} uydu oluşturuluyor...`);
     const satellites = [];
+    
+    // Jeosenkron yörünge parametreleri
+    const GEO_RADIUS = 35786e3 + 6371e3; // metre cinsinden (42,157 km)
+    const GEO_VARIATION = 1000e3; // metre cinsinden (±1000 km)
+
     for (let i = 0; i < numSatellites; i++) {
         // Başlangıç açısını eşit aralıklarla dağıt
         const initialAngle = (2 * Math.PI * i) / numSatellites;
         
-        // Rastgele yörünge parametreleri
-        const orbitRadius = 20000e3 + Math.random() * 40000e3; // 20,000 km ile 60,000 km arası
-        const inclination = (Math.random() - 0.5) * Math.PI / 3; // ±30 derece
+        // Jeosenkron yörünge etrafında küçük varyasyonlar
+        const orbitRadius = GEO_RADIUS + (Math.random() - 0.5) * GEO_VARIATION;
+        
+        // Küçük eğim açıları (±2 derece)
+        const inclination = (Math.random() - 0.5) * Math.PI / 90;
+        
         const initialFuel = 80 + Math.random() * 20; // 80-100 arası
         
         const satellite = new Satellite(
@@ -42,9 +50,9 @@ async function main() {
         satellites.push(satellite);
         console.log(
             `Uydu ${i + 1} oluşturuldu:\n` +
-            `  Yörünge yarıçapı: ${(orbitRadius/1000).toFixed(0)} km\n` +
+            `  Yörünge yarıçapı: ${((orbitRadius-6371e3)/1000).toFixed(0)} km\n` + // Yüksekliği göster
             `  Başlangıç açısı: ${(initialAngle * 180/Math.PI).toFixed(1)}°\n` +
-            `  Eğim: ${(inclination * 180/Math.PI).toFixed(1)}°\n` +
+            `  Eğim: ${(inclination * 180/Math.PI).toFixed(3)}°\n` +
             `  Periyot: ${(satellite.orbitPeriod/3600).toFixed(1)} saat\n` +
             `  Yakıt: ${initialFuel.toFixed(1)}`
         );
@@ -53,84 +61,146 @@ async function main() {
     const moon = new Moon();
     const rocket = new Rocket(rocketFuel);
     
-    console.log(`\nRoket yakıt kapasitesi: ${rocketFuel/1000} km`);
+    console.log(`\nRoket yakıt kapasitesi: ${rocketFuel} birim`);
     
-    // Genetik Algoritma'yı başlat
-    const ga = new GeneticAlgorithm(satellites, moon, rocket, {
-        populationSize: 100,
-        generations: 100,
-        mutationRate: 0.1,
-        eliteSize: 10
+    // Genetik Algoritma yerine Ant Colony kullan
+    const aco = new AntColonyOptimization(satellites, moon, rocket, {
+        numAnts: 200,
+        iterations: 500,
+        evaporationRate: 0.3,
+        alpha: 1.0,
+        beta: 3.0,
+        Q: 150
     });
 
-    // Yeni en iyi çözüm bulunduğunda görselleştirmeyi güncelle
-    ga.onNewBestSolution = (data) => {
-        // Animasyon için çözüm adımlarını hazırla
+    // Event handler'ı güncelle
+    aco.onNewBestSolution = (data) => {
         const animationSteps = [];
         let currentTime = 0;
+        let currentFuel = rocket.maxFuel;
+        let totalDistance = 0;
         
+        // Tüm uyduların başlangıç durumlarını kopyala
+        const satelliteStates = satellites.map(sat => ({
+            orbitRadius: sat.orbitRadius,
+            currentAngle: sat.currentAngle,
+            inclination: sat.inclination,
+            fuel: sat.fuel
+        }));
+
         for (let i = 0; i < data.solution.length - 1; i++) {
             const currentIdx = data.solution[i];
             const nextIdx = data.solution[i + 1];
             
-            // Her adım için 10 ara kare oluştur
-            const frames = 10;
+            // Hohmann transfer süresi
+            const startRadius = currentIdx === 0 ? moon.semiMajorAxis : 
+                satellites[currentIdx - 1].orbitRadius;
+            const endRadius = nextIdx === 0 ? moon.semiMajorAxis : 
+                satellites[nextIdx - 1].orbitRadius;
+            const transferTime = calculateHohmannTime(startRadius, endRadius);
+            
+            // Her adım için 20 ara kare oluştur
+            const frames = 20;
+            const timePerFrame = transferTime / frames;
+            
             for (let frame = 0; frame <= frames; frame++) {
-                const t = frame / frames;
+                // Tüm uyduların pozisyonlarını güncelle
+                satelliteStates.forEach((state, idx) => {
+                    const sat = satellites[idx];
+                    state.currentAngle += sat.orbitSpeed * timePerFrame;
+                    
+                    // Yeni pozisyonu hesapla
+                    const x = state.orbitRadius * Math.cos(state.currentAngle);
+                    const y = state.orbitRadius * Math.sin(state.currentAngle);
+                    const yRotated = y * Math.cos(state.inclination);
+                    const z = y * Math.sin(state.inclination);
+                    
+                    satellites[idx].currentPosition = new Point3D(x, yRotated, z);
+                    
+                    // Yakıt tüketimi
+                    if (state.fuel > 0) {
+                        state.fuel = Math.max(0, state.fuel - 0.01); // Zamanla azalan yakıt
+                    }
+                });
+
+                // Ay'ın pozisyonunu güncelle
+                const moonPos = moon.getPosition(currentTime + frame * timePerFrame);
                 
-                // Pozisyonları interpolate et
-                const startPos = currentIdx === 0 ? 
-                    moon.getPosition(currentTime) : 
+                // Roketin pozisyonunu hesapla
+                const startPos = currentIdx === 0 ? moonPos : 
                     satellites[currentIdx - 1].currentPosition;
-                
-                const endPos = nextIdx === 0 ? 
-                    moon.getPosition(currentTime) : 
+                const endPos = nextIdx === 0 ? moonPos : 
                     satellites[nextIdx - 1].currentPosition;
                 
+                const t = frame / frames;
                 const currentPos = {
                     x: startPos.x + (endPos.x - startPos.x) * t,
                     y: startPos.y + (endPos.y - startPos.y) * t,
                     z: startPos.z + (endPos.z - startPos.z) * t
                 };
+
+                // Yakıt tüketimi
+                const segmentDistance = rocket.calculateAxisDistance(startPos, endPos);
+                const fuelNeeded = rocket.calculateFuelConsumption(segmentDistance);
+                const fuelPerFrame = fuelNeeded / frames;
                 
+                if (frame < frames) {
+                    currentFuel = Math.max(0, currentFuel - fuelPerFrame);
+                    totalDistance += segmentDistance / frames;
+                }
+
+                // Yakıt ikmal kontrolü
+                if (frame === frames) {
+                    if (nextIdx === 0) {
+                        // Ay'da yakıt doldur
+                        currentFuel = rocket.maxFuel;
+                    } else if (currentFuel < rocket.maxFuel * 0.2) {
+                        // Yakıt kritik seviyede, Ay'a dönüş zorunlu
+                        console.log("Kritik yakıt seviyesi - Ay'a dönüş gerekli");
+                        return null;
+                    }
+                }
+
                 animationSteps.push({
-                    satellites: satellites.map(sat => ({
+                    satellites: satellites.map((sat, idx) => ({
                         position: sat.currentPosition,
-                        fuel: sat.fuel
+                        fuel: satelliteStates[idx].fuel
                     })),
-                    moon: moon.getPosition(currentTime),
-                    rocketPath: data.solution.map((idx, i) => {
-                        if (idx === 0) return moon.getPosition(i);
+                    moon: moonPos,
+                    rocketPath: data.solution.slice(0, i + 1).map((idx, j) => {
+                        if (idx === 0) return moon.getPosition(currentTime + j * timePerFrame);
                         return satellites[idx - 1].currentPosition;
                     }),
                     rocketPosition: currentPos,
-                    rocketFuel: data.fuelStates[currentIdx] || rocket.fuel,
-                    targetIndex: nextIdx
+                    rocketFuel: currentFuel,
+                    targetIndex: nextIdx,
+                    totalDistance: totalDistance
                 });
             }
             
-            currentTime += calculateHohmannTime(
-                currentIdx === 0 ? moon.semiMajorAxis : satellites[currentIdx - 1].semiMajorAxis,
-                nextIdx === 0 ? moon.semiMajorAxis : satellites[nextIdx - 1].semiMajorAxis
-            );
+            currentTime += transferTime;
         }
         
-        // Animasyonu başlat
         visualizer.setSolution(animationSteps);
     };
     
     // Optimizasyonu başlat
-    const result = await ga.optimize();
+    const result = await aco.optimize();
     
     // Sonuçları göster
     console.log("\nFinal Sonuçları:");
     console.log("=".repeat(50));
-    console.log(`En iyi rota: ${result.solution}`);
-    console.log(`Toplam delta-v: ${(result.cost/1000).toFixed(2)} km/s`);
-    console.log("\nUyduların Son Yakıt Durumları:");
-    result.fuelStates.forEach((fuel, idx) => {
-        console.log(`Uydu ${idx + 1}: ${fuel.toFixed(1)} birim yakıt`);
-    });
+    console.log(`En iyi rota: ${result.solution || 'Bulunamadı'}`);
+    console.log(`Toplam delta-v: ${result.cost === Infinity ? 'Hesaplanamadı' : (result.cost/1000).toFixed(2) + ' km/s'}`);
+
+    if (result.fuelStates) {
+        console.log("\nUyduların Son Yakıt Durumları:");
+        result.fuelStates.forEach((fuel, idx) => {
+            console.log(`Uydu ${idx}: ${fuel.toFixed(1)} birim yakıt`);
+        });
+    } else {
+        console.log("\nUyarı: Geçerli bir çözüm bulunamadı!");
+    }
     console.log("=".repeat(50));
 }
 

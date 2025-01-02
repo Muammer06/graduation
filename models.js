@@ -65,19 +65,22 @@ class Satellite extends CelestialObject {
         this.currentAngle = initialAngle;
         this.inclination = inclination;
         this.fuel = fuel;
-        this.centralMass = 5.972e24; // Dünya kütlesi (kg)
+        this.initialFuel = fuel; // Başlangıç yakıt miktarını sakla
+        this.centralMass = 5.972e24;
         this.currentPosition = null;
+        this.totalDistance = 0; // Toplam kat edilen mesafe
+        this.fuelConsumptionRate = 0.0002; // Her km için tüketilen yakıt
         
-        // Yörünge hızını hesapla (Kepler'in 3. yasası)
+        // Yörünge hızını hesapla
         const mu = CelestialObject.G * this.centralMass;
         this.orbitPeriod = 2 * Math.PI * Math.sqrt(Math.pow(orbitRadius, 3) / mu);
         this.orbitSpeed = (2 * Math.PI) / this.orbitPeriod;
         
-        this.updatePosition(0); // Başlangıç pozisyonunu hesapla
+        this.updatePosition(0);
     }
 
     updatePosition(time) {
-        // Yeni açıyı hesapla
+        const oldPosition = this.currentPosition;
         const angle = this.currentAngle + this.orbitSpeed * time;
         
         // Yörünge düzlemindeki koordinatlar
@@ -90,6 +93,25 @@ class Satellite extends CelestialObject {
         
         this.currentPosition = new Point3D(x, yRotated, z);
         this.currentAngle = angle;
+
+        // Kat edilen mesafeyi hesapla ve yakıt tüket
+        if (oldPosition) {
+            const distance = this.currentPosition.distanceTo(oldPosition);
+            this.totalDistance += distance;
+            this.consumeFuel(distance);
+        }
+    }
+
+    // Mesafeye bağlı yakıt tüketimi
+    consumeFuel(distance) {
+        const distanceInKm = distance / 1000;
+        const consumption = distanceInKm * this.fuelConsumptionRate;
+        this.fuel = Math.max(0, this.fuel - consumption);
+    }
+
+    // Yakıt yüzdesi
+    getFuelPercentage() {
+        return (this.fuel / this.initialFuel) * 100;
     }
 }
 
@@ -117,15 +139,41 @@ class Rocket {
         this.fuel = fuelCapacity;
         this.maxFuel = fuelCapacity;
         this.currentPosition = null;
-        this.isp = 300; // Özgül impuls (saniye)
-        this.mass = 1000; // Kuru kütle (kg)
+        this.fuelConsumptionRate = 0.0001; // Her km için tüketilen yakıt (0.0001 birim/km)
     }
 
-    calculateFuelConsumption(deltaV) {
-        const g0 = 9.81; // Yerçekimi ivmesi (m/s²)
-        const massRatio = Math.exp(deltaV / (this.isp * g0));
-        const fuelMass = this.mass * (massRatio - 1);
-        return fuelMass;
+    // Mesafeye göre yakıt tüketimini hesapla (metre -> km dönüşümü yaparak)
+    calculateFuelConsumption(distance) {
+        const distanceInKm = distance / 1000; // metreyi km'ye çevir
+        return distanceInKm * this.fuelConsumptionRate;
+    }
+
+    // Yakıt ikmali yap (birim cinsinden)
+    refuel(satellite) {
+        const refuelAmount = Math.min(
+            satellite.fuel,
+            this.maxFuel - this.fuel
+        );
+        
+        if (refuelAmount > 0) {
+            satellite.fuel -= refuelAmount;
+            this.fuel += refuelAmount;
+            return refuelAmount;
+        }
+        return 0;
+    }
+
+    // İki nokta arasındaki mesafeyi metre cinsinden hesapla
+    calculateAxisDistance(from, to) {
+        const dx = Math.abs(to.x - from.x);
+        const dy = Math.abs(to.y - from.y);
+        const dz = Math.abs(to.z - from.z);
+        return dx + dy + dz;
+    }
+
+    canTravel(distance) {
+        const requiredFuel = this.calculateFuelConsumption(distance);
+        return this.fuel >= requiredFuel;
     }
 }
 

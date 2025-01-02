@@ -5,16 +5,38 @@ class SpaceVisualizer {
     constructor(container) {
         this.container = container;
         this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1000000000);
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        
+        // Renderer ayarları
+        this.renderer = new THREE.WebGLRenderer({ 
+            antialias: false,
+            powerPreference: "high-performance",
+            precision: "mediump"
+        });
+        
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1000, 1000000000);
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         
-        // Animasyon parametreleri
-        this.animationSpeed = 1; // saniye başına adım
+        // Performans optimizasyonları
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.maxVisibleSatellites = 30;
+        this.rocketPathLength = 50;
+        
+        // Bellek yönetimi için
+        this.disposables = new Set();
+        
+        // Geometrileri önbelleğe al
+        this.geometries = {
+            satellite: new THREE.SphereGeometry(2000, 8, 8),
+            rocket: new THREE.ConeGeometry(1000, 4000, 8)
+        };
+        
+        // Animasyon kontrolü
+        this.animationSpeed = 1;
         this.currentStep = 0;
         this.solution = null;
         this.isPlaying = false;
         this.lastTime = 0;
+        this.targetStep = 0;
         
         this.init();
     }
@@ -60,125 +82,149 @@ class SpaceVisualizer {
     }
 
     updateScene(data) {
-        // Veri kontrolü
         if (!data) return;
         
-        // Uyduları güncelle
-        if (data.satellites) {
-            this.updateSatellites(data.satellites);
+        try {
+            // Sadece görünür uyduları güncelle
+            if (data.satellites) {
+                const visibleSatellites = data.satellites.slice(0, this.maxVisibleSatellites);
+                this.updateSatellites(visibleSatellites);
+            }
+            
+            if (data.moon) {
+                this.updateMoon(data.moon);
+            }
+            
+            if (data.rocketPath) {
+                // Roket izini sınırla
+                const limitedPath = data.rocketPath.slice(-this.rocketPathLength);
+                this.updateRocketPath(limitedPath);
+            }
+            
+            if (data.rocketPosition && data.rocketFuel !== undefined) {
+                this.updateRocket(data.rocketPosition, data.rocketFuel, data.totalDistance);
+            }
+            
+            this.updateFuelPanel(data);
+            this.updateNextTarget(this.currentStep);
+            
+        } catch (error) {
+            console.warn('Scene güncelleme hatası:', error);
+            this.handleWebGLError();
+        }
+    }
+
+    // WebGL hata yönetimi
+    handleWebGLError() {
+        if (this.renderer.getContext().isContextLost()) {
+            console.log('WebGL context kaybedildi, yenileniyor...');
+            this.renderer.setAnimationLoop(null);
+            this.initRenderer();
+        }
+    }
+
+    initRenderer() {
+        // Renderer'ı yeniden başlat
+        this.renderer.dispose();
+        this.renderer = new THREE.WebGLRenderer({
+            antialias: false,
+            powerPreference: "high-performance",
+            precision: "mediump"
+        });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.container.appendChild(this.renderer.domElement);
+    }
+
+    // Adım kontrolü için yeni metodlar
+    setStep(step) {
+        if (!this.solution) return;
+        
+        step = Math.max(0, Math.min(step, this.solution.length - 1));
+        this.currentStep = step;
+        this.targetStep = step;
+        
+        const data = this.getStepData();
+        if (data) {
+            this.updateScene(data);
+            this.updateProgressUI();
+        }
+    }
+
+    updateProgressUI() {
+        const progress = document.getElementById('progress');
+        const stepInfo = document.getElementById('step-info');
+        
+        if (progress && this.solution) {
+            progress.value = (this.currentStep / (this.solution.length - 1)) * 100;
         }
         
-        // Ay'ı güncelle
-        if (data.moon) {
-            this.updateMoon(data.moon);
+        if (stepInfo && this.solution) {
+            stepInfo.textContent = `Adım: ${this.currentStep}/${this.solution.length - 1}`;
         }
-        
-        // Roket yolunu güncelle
-        if (data.rocketPath) {
-            this.updateRocketPath(data.rocketPath);
-        }
-
-        // Roket pozisyonunu güncelle
-        if (data.rocketPosition && data.rocketFuel) {
-            this.updateRocket(data.rocketPosition, data.rocketFuel);
-        }
-
-        // Sonraki hedefi güncelle
-        this.updateNextTarget(this.currentStep);
     }
 
     updateSatellites(satellites) {
         // Mevcut uyduları temizle
         this.scene.children
             .filter(child => child.userData.type === 'satellite')
-            .forEach(satellite => this.scene.remove(satellite));
+            .forEach(satellite => {
+                this.scene.remove(satellite);
+            });
 
         // Yeni uyduları ekle
         satellites.forEach((sat, index) => {
-            // Ana uydu gövdesi
-            const bodyGeometry = new THREE.SphereGeometry(2000, 12, 12);
+            const satellite = new THREE.Group();
+            
+            // Ana gövde
             const bodyMaterial = new THREE.MeshPhongMaterial({
                 color: 0xff4400,
                 emissive: 0x441100,
                 specular: 0x333333,
                 shininess: 25
             });
-            const satellite = new THREE.Mesh(bodyGeometry, bodyMaterial);
             
-            // Güneş panelleri
-            const panelGeometry = new THREE.BoxGeometry(8000, 100, 2000);
-            const panelMaterial = new THREE.MeshPhongMaterial({
-                color: 0x2244ff,
-                emissive: 0x112244,
-                specular: 0x888888,
-                shininess: 100
-            });
-            const leftPanel = new THREE.Mesh(panelGeometry, panelMaterial);
-            const rightPanel = new THREE.Mesh(panelGeometry, panelMaterial);
+            const body = new THREE.Mesh(this.geometries.satellite, bodyMaterial);
+            satellite.add(body);
             
-            leftPanel.position.x = -5000;
-            rightPanel.position.x = 5000;
-            
-            satellite.add(leftPanel);
-            satellite.add(rightPanel);
-            
-            // Anten
-            const antennaGeometry = new THREE.CylinderGeometry(100, 100, 3000, 8);
-            const antennaMaterial = new THREE.MeshPhongMaterial({
-                color: 0xcccccc,
-                emissive: 0x222222
-            });
-            const antenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
-            antenna.rotation.x = Math.PI / 2;
-            antenna.position.z = 1500;
-            satellite.add(antenna);
-            
-            // Yörünge çizgisi
-            const orbitGeometry = new THREE.BufferGeometry();
-            const orbitPoints = [];
-            const segments = 100;
-            for (let i = 0; i <= segments; i++) {
-                const angle = (i / segments) * Math.PI * 2;
-                const x = Math.cos(angle) * sat.position.x - Math.sin(angle) * sat.position.y;
-                const y = Math.sin(angle) * sat.position.x + Math.cos(angle) * sat.position.y;
-                const z = sat.position.z;
-                orbitPoints.push(new THREE.Vector3(x, y, z));
-            }
-            orbitGeometry.setFromPoints(orbitPoints);
-            const orbitMaterial = new THREE.LineBasicMaterial({
-                color: 0x444444,
-                opacity: 0.5,
-                transparent: true
-            });
-            const orbit = new THREE.Line(orbitGeometry, orbitMaterial);
-            this.scene.add(orbit);
-            
-            // Uydu etiketini ekle
-            const sprite = new THREE.Sprite(
-                new THREE.SpriteMaterial({
-                    map: this.createTextTexture(`Uydu-${index + 1}\nYakıt: ${sat.fuel.toFixed(1)}`)
-                })
-            );
-            sprite.scale.set(10000, 5000, 1);
-            sprite.position.y = 3000;
+            // Etiket ekle
+            const sprite = this.createSatelliteLabel(index + 1, sat.fuel);
             satellite.add(sprite);
             
-            // Uydu pozisyonunu ayarla
             satellite.position.set(sat.position.x, sat.position.y, sat.position.z);
             satellite.userData.type = 'satellite';
-            satellite.userData.fuel = sat.fuel;
-            satellite.userData.index = index;
-            
-            // Yakıt durumuna göre renk değiştir
-            const fuelRatio = sat.fuel / 100;
-            bodyMaterial.emissive.setRGB(
-                0.4 * (1 - fuelRatio),
-                0.4 * fuelRatio,
-                0
-            );
             
             this.scene.add(satellite);
         });
+    }
+
+    createSatelliteLabel(index, fuel) {
+        const canvas = document.createElement('canvas');
+        const size = 128;
+        canvas.width = size;
+        canvas.height = size;
+        
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.fillRect(0, 0, size, size);
+        
+        ctx.font = 'bold 16px Arial';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Uydu-${index}`, size/2, size/2 - 10);
+        ctx.fillText(`${fuel.toFixed(1)}`, size/2, size/2 + 10);
+        
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        
+        sprite.scale.set(5000, 5000, 1);
+        sprite.position.y = 3000;
+        
+        this.disposables.add(spriteMaterial);
+        this.disposables.add(texture);
+        
+        return sprite;
     }
 
     updateMoon(moonPosition) {
@@ -197,87 +243,102 @@ class SpaceVisualizer {
     }
 
     updateRocketPath(path) {
-        // Mevcut yolu temizle
+        // Mevcut yolu temizle ve belleği serbest bırak
         this.scene.children
             .filter(child => child.userData.type === 'rocketPath')
-            .forEach(path => this.scene.remove(path));
+            .forEach(path => {
+                this.scene.remove(path);
+                if (path.geometry) path.geometry.dispose();
+                if (path.material) path.material.dispose();
+            });
 
-        // Yeni yolu çiz
+        // Yolu optimize et
+        const simplifiedPath = this.simplifyPath(path);
+        
         const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(path.flatMap(p => [p.x, p.y, p.z]));
+        const positions = new Float32Array(simplifiedPath.flatMap(p => [p.x, p.y, p.z]));
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         
-        const material = new THREE.LineBasicMaterial({
-            color: 0x00ff00,
-            linewidth: 2
-        });
-        
+        const material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
         const rocketPath = new THREE.Line(geometry, material);
         rocketPath.userData.type = 'rocketPath';
+        
         this.scene.add(rocketPath);
+        this.disposables.add(rocketPath);
     }
 
-    updateRocket(position, fuel) {
+    // Yolu basitleştir
+    simplifyPath(path) {
+        if (path.length <= 2) return path;
+        
+        const tolerance = 1000; // metre cinsinden basitleştirme toleransı
+        const simplified = [path[0]];
+        
+        for (let i = 1; i < path.length - 1; i++) {
+            const prev = simplified[simplified.length - 1];
+            const curr = path[i];
+            const next = path[i + 1];
+            
+            const d = this.pointLineDistance(curr, prev, next);
+            if (d > tolerance) {
+                simplified.push(curr);
+            }
+        }
+        
+        simplified.push(path[path.length - 1]);
+        return simplified;
+    }
+
+    pointLineDistance(point, lineStart, lineEnd) {
+        const numerator = Math.abs(
+            (lineEnd.x - lineStart.x) * (lineStart.y - point.y) -
+            (lineStart.x - point.x) * (lineEnd.y - lineStart.y)
+        );
+        const denominator = Math.sqrt(
+            Math.pow(lineEnd.x - lineStart.x, 2) +
+            Math.pow(lineEnd.y - lineStart.y, 2)
+        );
+        return numerator / denominator;
+    }
+
+    updateRocket(position, fuel, totalDistance) {
         if (!this.rocket) {
-            // Roket geometrisi oluştur (konik şekil)
-            const geometry = new THREE.ConeGeometry(2000, 8000, 8);
             const material = new THREE.MeshPhongMaterial({
-                color: 0x00ff00,
-                emissive: 0x003300,
-                specular: 0x111111,
+                color: 0xcccccc,
+                emissive: 0x444444,
+                specular: 0x666666,
                 shininess: 30
             });
-            this.rocket = new THREE.Mesh(geometry, material);
-            this.rocket.userData.type = 'rocket';
             
-            // Roket izi için parçacık sistemi
-            this.rocketTrail = new THREE.Points(
-                new THREE.BufferGeometry(),
-                new THREE.PointsMaterial({
-                    color: 0xff3300,
-                    size: 1000,
-                    blending: THREE.AdditiveBlending,
-                    transparent: true,
-                    opacity: 0.8
-                })
-            );
-            this.scene.add(this.rocketTrail);
+            this.rocket = new THREE.Mesh(this.geometries.rocket, material);
+            this.rocket.userData.type = 'rocket';
             this.scene.add(this.rocket);
-            this.rocket.maxFuel = 20000e3; // Roketin maksimum yakıt kapasitesi
+            
+            // Roket izi için
+            this.trailPositions = [];
+            const trailGeometry = new THREE.BufferGeometry();
+            const trailMaterial = new THREE.LineBasicMaterial({ 
+                color: 0x00ff00,
+                opacity: 0.5,
+                transparent: true
+            });
+            this.rocketTrail = new THREE.Line(trailGeometry, trailMaterial);
+            this.scene.add(this.rocketTrail);
         }
-        
-        // Position'ı THREE.Vector3'e dönüştür
-        const pos = new THREE.Vector3(position.x, position.y, position.z);
-        
+
         // Roket pozisyonunu güncelle
-        this.rocket.position.copy(pos);
-        
-        // Roketin yönünü hareket yönüne çevir
-        if (this.lastRocketPos) {
-            const direction = new THREE.Vector3()
-                .subVectors(pos, this.lastRocketPos)
-                .normalize();
-            this.rocket.lookAt(pos.clone().add(direction));
-        }
-        this.lastRocketPos = pos.clone();
-        
-        // Yakıt durumuna göre renk değiştir
-        const fuelRatio = fuel / this.rocket.maxFuel;
-        const fuelColor = new THREE.Color(
-            Math.min(2 - 2 * fuelRatio, 1),
-            Math.min(2 * fuelRatio, 1),
-            0
-        );
-        this.rocket.material.emissive.setHex(fuelColor.getHex());
+        this.rocket.position.set(position.x, position.y, position.z);
         
         // Roket izini güncelle
-        this.updateRocketTrail(pos);
+        this.updateRocketTrail(position);
         
         // UI bilgilerini güncelle
         document.getElementById('rocket-fuel').innerHTML = 
-            `Yakıt: <span class="highlight">${(fuelRatio * 100).toFixed(1)}%</span>`;
+            `Yakıt: <span class="highlight" style="color: ${this.getFuelColor(fuel/100)}">${fuel.toFixed(1)} birim</span>`;
         document.getElementById('rocket-position').innerHTML = 
-            `Konum: <span class="highlight">${position.x.toFixed(0)}, ${position.y.toFixed(0)}, ${position.z.toFixed(0)}</span>`;
+            `Konum: <span class="highlight">${(position.x/1000).toFixed(0)}, ${(position.y/1000).toFixed(0)}, ${(position.z/1000).toFixed(0)} km</span>`;
+        document.getElementById('total-distance').innerHTML = 
+            `Toplam Mesafe: <span class="highlight">${(totalDistance/1000).toFixed(0)} km</span>`;
     }
 
     updateRocketTrail(position) {
@@ -308,29 +369,27 @@ class SpaceVisualizer {
         if (!this.isPlaying) return;
         
         const currentTime = performance.now();
-        const deltaTime = (currentTime - this.lastTime) / 1000; // saniyeye çevir
+        const deltaTime = (currentTime - this.lastTime) / 1000;
         
         if (deltaTime >= 1 / this.animationSpeed) {
-            this.currentStep++;
-            if (this.currentStep >= (this.solution?.length || 0)) {
+            if (this.currentStep >= (this.solution?.length - 1 || 0)) {
                 this.currentStep = 0;
+            } else {
+                this.currentStep++;
             }
             
-            const stepData = this.getStepData();
-            if (stepData) {
-                this.updateScene(stepData);
-                document.getElementById('progress').value = 
-                    (this.currentStep / (this.solution.length - 1)) * 100;
-                document.getElementById('step-info').textContent = 
-                    `Adım: ${this.currentStep}/${this.solution.length - 1}`;
-            }
-            
+            this.setStep(this.currentStep);
             this.lastTime = currentTime;
         }
         
-        this.controls.update();
-        this.renderer.render(this.scene, this.camera);
-        requestAnimationFrame(() => this.animate());
+        try {
+            this.controls.update();
+            this.renderer.render(this.scene, this.camera);
+            requestAnimationFrame(() => this.animate());
+        } catch (error) {
+            console.warn('Animasyon hatası:', error);
+            this.handleWebGLError();
+        }
     }
 
     // Yardımcı metod: Metin dokusunu oluştur
@@ -385,11 +444,13 @@ class SpaceVisualizer {
             <div>
                 <button id="play-pause">▶️ Oynat</button>
                 <button id="reset">⏮️ Başa Dön</button>
+                <button id="step-backward">⏪</button>
+                <button id="step-forward">⏩</button>
                 <input type="range" id="speed" min="0.1" max="5" step="0.1" value="1">
                 <span id="speed-value">1x</span>
             </div>
             <div>
-                <input type="range" id="progress" min="0" max="100" value="0">
+                <input type="range" id="progress" min="0" max="100" value="0" step="1">
                 <span id="step-info">Adım: 0/0</span>
             </div>
         `;
@@ -399,13 +460,15 @@ class SpaceVisualizer {
         // Event listeners
         document.getElementById('play-pause').onclick = () => this.togglePlayPause();
         document.getElementById('reset').onclick = () => this.resetAnimation();
+        document.getElementById('step-backward').onclick = () => this.setStep(this.currentStep - 1);
+        document.getElementById('step-forward').onclick = () => this.setStep(this.currentStep + 1);
         document.getElementById('speed').oninput = (e) => {
             this.animationSpeed = parseFloat(e.target.value);
             document.getElementById('speed-value').textContent = `${this.animationSpeed}x`;
         };
         document.getElementById('progress').oninput = (e) => {
-            this.currentStep = Math.floor((e.target.value / 100) * (this.solution?.length || 0));
-            this.updateScene(this.getStepData());
+            const step = Math.floor((e.target.value / 100) * (this.solution?.length - 1 || 0));
+            this.setStep(step);
         };
     }
     
@@ -477,6 +540,70 @@ class SpaceVisualizer {
         
         document.getElementById('next-target').innerHTML = 
             `Sonraki Hedef: <span class="highlight">${targetName}</span>`;
+    }
+
+    // Yeni metod: Yakıt durumu paneli
+    updateFuelPanel(data) {
+        let panel = document.getElementById('fuel-panel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'fuel-panel';
+            panel.style.cssText = `
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                background: rgba(0,0,0,0.7);
+                padding: 10px;
+                border-radius: 5px;
+                color: white;
+                font-family: monospace;
+                min-width: 200px;
+            `;
+            this.container.appendChild(panel);
+        }
+
+        // Roket ve uydu yakıt durumlarını göster
+        let html = `<div style="border-bottom: 1px solid #444; margin-bottom: 5px; padding-bottom: 5px;">
+            <div>🚀 Roket Yakıtı: <span style="color: ${this.getFuelColor(data.rocketFuel/100)}">${data.rocketFuel.toFixed(1)} birim</span></div>
+            <div>📍 Adım: ${this.currentStep}/${this.solution?.length || 0}</div>
+            <div>🛣️ Toplam Mesafe: ${(data.totalDistance/1000).toFixed(0)} km</div>
+        </div>`;
+
+        // Uyduların yakıt durumları
+        if (data.satellites) {
+            html += '<div style="max-height: 200px; overflow-y: auto;">';
+            data.satellites.forEach((sat, idx) => {
+                const fuelPercentage = (sat.fuel / 100) * 100;
+                html += `<div style="margin: 2px 0;">
+                    🛰️ Uydu-${idx + 1}: <span style="color: ${this.getFuelColor(sat.fuel/100)}">${sat.fuel.toFixed(1)} birim</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+
+        panel.innerHTML = html;
+    }
+
+    // Yakıt seviyesine göre renk döndür
+    getFuelColor(fuelRatio) {
+        if (fuelRatio > 0.6) return '#4CAF50'; // Yeşil
+        if (fuelRatio > 0.3) return '#FFC107'; // Sarı
+        return '#F44336'; // Kırmızı
+    }
+
+    dispose() {
+        // Tüm nesneleri temizle
+        this.disposables.forEach(item => {
+            if (item.geometry) item.geometry.dispose();
+            if (item.material) item.material.dispose();
+            if (item.texture) item.texture.dispose();
+        });
+        this.disposables.clear();
+        
+        // Scene'i temizle
+        while(this.scene.children.length > 0) { 
+            this.scene.remove(this.scene.children[0]); 
+        }
     }
 }
 
