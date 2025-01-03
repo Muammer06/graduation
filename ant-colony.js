@@ -1,208 +1,189 @@
+import { Point3D } from './models.js';
+
 class AntColonyOptimization {
     constructor(satellites, moon, rocket, options = {}) {
         this.satellites = satellites;
         this.moon = moon;
         this.rocket = rocket;
-        this.numAnts = options.numAnts || 50;
+        this.numAnts = options.numAnts || 100;
         this.iterations = options.iterations || 100;
         this.evaporationRate = options.evaporationRate || 0.1;
-        this.alpha = options.alpha || 1.0;  // Feromon önem faktörü
-        this.beta = options.beta || 2.0;    // Sezgisel önem faktörü
-        this.Q = options.Q || 100;          // Feromon güncelleme sabiti
-        
-        // Düğümler arası mesafe ve feromon matrisleri
-        this.numNodes = satellites.length + 1; // +1 for moon
+        this.alpha = options.alpha || 1.0;
+        this.beta = options.beta || 5.0;
+        this.Q = options.Q || 100;
+
+        this.numNodes = satellites.length + 1;
         this.distances = Array(this.numNodes).fill().map(() => Array(this.numNodes).fill(0));
         this.pheromones = Array(this.numNodes).fill().map(() => Array(this.numNodes).fill(1));
-        
+
         this.bestSolution = null;
         this.bestCost = Infinity;
         this.onNewBestSolution = null;
-        
+
         this.initializeDistances();
-        this.minFuelThreshold = 0.3; // Ay'a dönüş için minimum yakıt seviyesi (%30)
-        this.maxVisitsBeforeMoon = 3; // Ay'a dönmeden önce maksimum uydu ziyareti
+        this.timeStep = 3600; // 1 saatlik zaman adımı (saniye)
+        this.fuelConsumptionPerHour = 0.005; // Saatlik doğal yakıt tüketimi
     }
 
     initializeDistances() {
-        // Ay (indeks 0) ve tüm uydular arasındaki mesafeleri hesapla
         for (let i = 0; i < this.numNodes; i++) {
             for (let j = 0; j < this.numNodes; j++) {
                 if (i === j) continue;
-                
-                const pos1 = i === 0 ? this.moon.getPosition(0) : 
-                    this.satellites[i - 1].currentPosition;
-                const pos2 = j === 0 ? this.moon.getPosition(0) : 
-                    this.satellites[j - 1].currentPosition;
-                
+
+                const pos1 = i === 0 ? this.moon.getPosition() : this.satellites[i - 1].currentPosition;
+                const pos2 = j === 0 ? this.moon.getPosition() : this.satellites[j - 1].currentPosition;
+
                 this.distances[i][j] = pos1.distanceTo(pos2);
             }
         }
     }
 
-    calculateDeltaV(from, to) {
-        const r1 = from === 0 ? this.moon.semiMajorAxis : 
-            this.satellites[from - 1].orbitRadius;
-        const r2 = to === 0 ? this.moon.semiMajorAxis : 
-            this.satellites[to - 1].orbitRadius;
-        
-        const mu = 3.986e14;
-        const v1 = Math.sqrt(mu/r1);
-        const v2 = Math.sqrt(mu/r2);
-        const a = (r1 + r2) / 2;
-        const vt1 = Math.sqrt(mu * (2/r1 - 1/a));
-        const vt2 = Math.sqrt(mu * (2/r2 - 1/a));
-        return Math.abs(vt1 - v1) + Math.abs(v2 - vt2);
+    calculatePriorities(satelliteStates) {
+        return satelliteStates.map((sat, index) => {
+            const fuelLevel = sat.fuel / 100;
+            const priorityScore = (1 - fuelLevel) * 2; // Yakıt seviyesi azaldıkça öncelik artar
+
+            return {
+                index: index,
+                score: priorityScore,
+                fuelLevel: fuelLevel,
+                position: sat.position
+            };
+        });
     }
 
     constructSolution() {
-        const visited = new Set([0]); // Başlangıç noktası olarak Ay
+        const visited = new Set([0]);
         const path = [0];
         let currentNode = 0;
-        let totalDistance = 0;
         let currentFuel = this.rocket.maxFuel;
-        let visitsAfterMoon = 0;
-        let attempts = 0; // Sonsuz döngüyü önlemek için
-        const maxAttempts = this.numNodes * 3; // Maksimum deneme sayısı
-        
-        const satelliteFuel = new Map(
-            this.satellites.map((sat, i) => [i + 1, sat.fuel])
-        );
+        let totalDistance = 0;
 
-        while (visited.size < this.numNodes && attempts < maxAttempts) {
-            attempts++;
+        const satelliteStates = this.satellites.map(sat => ({
+            fuel: sat.fuel,
+            position: {...sat.currentPosition},
+            orbitRadius: sat.orbitRadius,
+            orbitSpeed: sat.orbitSpeed,
+            currentAngle: sat.currentAngle,
+            inclination: sat.inclination,
+            fuelConsumptionRate: sat.fuelConsumptionRate
+        }));
+
+        while (visited.size < this.satellites.length + 1) { // Ay dahil
             const currentPos = currentNode === 0 ? 
-                this.moon.getPosition(0) : 
-                this.satellites[currentNode - 1].currentPosition;
-            
-            // Ay'a dönüş mesafesini hesapla
-            const moonPos = this.moon.getPosition(0);
-            const returnDistance = this.rocket.calculateAxisDistance(currentPos, moonPos);
-            const returnFuel = this.rocket.calculateFuelConsumption(returnDistance);
+                this.moon.getPosition() : 
+                satelliteStates[currentNode - 1].position;
 
-            // Ay'a dönüş zorunluluğu kontrolü
-            const needsToReturnToMoon = 
-                currentFuel < (this.rocket.maxFuel * this.minFuelThreshold) || 
-                visitsAfterMoon >= this.maxVisitsBeforeMoon || 
-                (currentNode !== 0 && returnFuel >= currentFuel * 0.8);
+            this.updateSatelliteStates(satelliteStates, this.timeStep);
 
-            if (needsToReturnToMoon && currentNode !== 0) {
-                if (!this.rocket.canTravel(returnDistance)) {
-                    return null;
-                }
-                path.push(0);
-                totalDistance += returnDistance;
-                currentFuel = this.rocket.maxFuel;
-                currentNode = 0;
-                visitsAfterMoon = 0;
-                continue;
-            }
+            const priorities = this.calculatePriorities(satelliteStates);
+            const candidates = priorities.filter(p => !visited.has(p.index + 1)).sort((a, b) => b.score - a.score);
 
-            // Gidilebilecek düğümleri değerlendir
-            const probabilities = [];
-            for (let next = 0; next < this.numNodes; next++) {
-                if (visited.has(next)) continue;
-                
-                const nextPos = next === 0 ? 
-                    this.moon.getPosition(0) : 
-                    this.satellites[next - 1].currentPosition;
-                
-                const distance = this.rocket.calculateAxisDistance(currentPos, nextPos);
-                const fuelNeeded = this.rocket.calculateFuelConsumption(distance);
-                
-                // Yakıt ve dönüş kontrolü
-                if (fuelNeeded <= currentFuel * 0.7) {
-                    const pheromone = this.pheromones[currentNode][next];
-                    const distanceHeuristic = 1 / distance;
-                    const fuelHeuristic = next === 0 ? 2 : 
-                        (satelliteFuel.get(next) || 0) / 100;
-                    
-                    const heuristic = distanceHeuristic * Math.pow(fuelHeuristic, 2);
-                    const probability = Math.pow(pheromone, this.alpha) * 
-                                     Math.pow(heuristic, this.beta);
-                    
-                    probabilities.push({ node: next, probability, distance });
-                }
-            }
+            console.log(`\nMevcut Durum:`);
+            console.log(`Roket Yakıtı: ${currentFuel.toFixed(1)}`);
+            console.log(`Ziyaret Edilen Uydular: ${Array.from(visited).join(', ')}`);
+            console.log(`Mevcut Konum: ${currentNode === 0 ? 'Ay' : `Uydu ${currentNode}`}`);
 
-            if (probabilities.length === 0) {
-                // Hiçbir yere gidemiyorsak ve Ay'a da dönemiyorsak
-                if (currentNode !== 0) {
-                    if (!this.rocket.canTravel(returnDistance)) {
-                        return null;
-                    }
-                    path.push(0);
-                    totalDistance += returnDistance;
-                    currentFuel = this.rocket.maxFuel;
-                    currentNode = 0;
-                    visitsAfterMoon = 0;
-                } else {
-                    return null; // Ay'dayız ve hiçbir yere gidemiyoruz
-                }
-                continue;
-            }
+            let selectedNext = null;
 
-            // Sonraki hedefi seç
-            const selected = this.selectNext(probabilities);
-            currentFuel -= this.rocket.calculateFuelConsumption(selected.distance);
-            totalDistance += selected.distance;
-            
-            if (selected.node !== 0) {
-                visitsAfterMoon++;
-                const currentSatFuel = satelliteFuel.get(selected.node) || 0;
-                const refuelAmount = Math.min(
-                    currentSatFuel,
-                    this.rocket.maxFuel - currentFuel
-                );
-                currentFuel += refuelAmount * 0.9;
-                satelliteFuel.set(selected.node, currentSatFuel - refuelAmount);
+            if (candidates.length > 0) {
+                selectedNext = candidates[0]; // En yüksek öncelikli adayı seç
+                console.log(`Seçilen Hedef: Uydu ${selectedNext.index + 1}`);
             } else {
-                currentFuel = this.rocket.maxFuel;
-                visitsAfterMoon = 0;
+                console.log(`Hiçbir uyduya gidilemiyor, mevcut yakıt: ${currentFuel}`);
+                break; // Hiçbir uyduya gidilemiyorsa döngüyü kır
             }
 
-            path.push(selected.node);
-            visited.add(selected.node);
-            currentNode = selected.node;
+            path.push(selectedNext.index + 1);
+            totalDistance += this.distances[currentNode][selectedNext.index + 1];
+
+            const distanceToNext = this.distances[currentNode][selectedNext.index + 1];
+            const fuelNeeded = this.rocket.calculateFuelConsumption(distanceToNext);
+
+            if (currentFuel < fuelNeeded) {
+                console.log(`Roket, Uydu ${selectedNext.index + 1}'e gitmek için yeterli yakıta sahip değil.`);
+                console.log(`Ay'a dönüyorum...`);
+
+                // Ay'a dönüş
+                const returnDistance = this.calculateDynamicDistance(currentPos, this.moon.getPosition());
+                const returnFuelNeeded = this.rocket.calculateFuelConsumption(returnDistance);
+
+                if (currentFuel < returnFuelNeeded) {
+                    console.log(`Roket Ay'a dönmek için yeterli yakıta sahip değil.`);
+                    break; // Yeterli yakıt yoksa döngüyü kır
+                }
+
+                // Ay'a dön
+                currentFuel -= returnFuelNeeded; // Ay'a dönüş için yakıtı düş
+                path.push(0); // Ay'a dönüş
+                totalDistance += returnDistance;
+
+                // Ay'da yakıt doldur
+                currentFuel = this.rocket.maxFuel; // Ay'da yakıt doldur
+                console.log(`Ay'a ulaşıldı, yakıt dolduruldu. Mevcut Yakıt: ${currentFuel.toFixed(1)}`);
+                currentNode = 0; // Ay'da
+                continue; // Döngüye devam et
+            }
+
+            currentFuel -= fuelNeeded; // Yakıtı düş
+            currentNode = selectedNext.index + 1; // Geçerli konumu güncelle
+            visited.add(currentNode); // Ziyaret edilenleri güncelle
         }
 
-        // Eğer tüm düğümleri ziyaret edemediyse geçersiz çözüm
-        if (visited.size < this.numNodes) {
+        // Geçerli çözüm kontrolü
+        const allSatellitesVisited = visited.size === this.satellites.length + 1; // Ay dahil
+        if (!allSatellitesVisited) {
+            console.log(`Geçerli bir çözüm bulunamadı, tüm uydular ziyaret edilmedi.`);
             return null;
         }
 
-        return { 
-            path, 
-            cost: totalDistance, 
-            fuelStates: Array.from(satelliteFuel.values())
+        console.log(`Geçerli bir çözüm bulundu!`);
+        return {
+            path,
+            cost: totalDistance,
+            fuelStates: satelliteStates.map(state => state.fuel),
+            timeElapsed: 0 // Zaman kısıtını kaldırdık, bu yüzden 0
         };
     }
 
-    // Yardımcı metod: Sonraki hedefi seç
-    selectNext(probabilities) {
-        const total = probabilities.reduce((sum, p) => sum + p.probability, 0);
-        let r = Math.random() * total;
-        
-        for (const p of probabilities) {
-            r -= p.probability;
-            if (r <= 0) return p;
-        }
-        return probabilities[0];
+    updateSatelliteStates(satelliteStates, timeStep) {
+        satelliteStates.forEach(state => {
+            state.currentAngle += state.orbitSpeed * timeStep;
+            const x = state.orbitRadius * Math.cos(state.currentAngle);
+            const y = state.orbitRadius * Math.sin(state.currentAngle) * Math.cos(state.inclination);
+            const z = state.orbitRadius * Math.sin(state.currentAngle) * Math.sin(state.inclination);
+            state.position = new Point3D(x, y, z);
+
+            const hoursPassed = timeStep / 3600;
+            const fuelConsumed = hoursPassed * this.fuelConsumptionPerHour;
+            state.fuel = Math.max(0, state.fuel - fuelConsumed);
+        });
     }
 
     updatePheromones(solutions) {
-        // Feromon buharlaşması
+        // Feromonları buharlaştır
         for (let i = 0; i < this.numNodes; i++) {
             for (let j = 0; j < this.numNodes; j++) {
                 this.pheromones[i][j] *= (1 - this.evaporationRate);
             }
         }
 
-        // Yeni feromon ekleme
+        // Yeni çözümler üzerinden feromon ekle
         for (const solution of solutions) {
             if (!solution) continue;
+
+            let totalFuelSaved = 0;
+            for (let i = 0; i < solution.path.length - 1; i++) {
+                const from = solution.path[i];
+                const to = solution.path[i + 1];
+                if (to !== 0) {
+                    const satFuel = this.satellites[to - 1].fuel;
+                    totalFuelSaved += (100 - satFuel); // Yakıt tasarrufu
+                }
+            }
+
+            const pheromoneAmount = (this.Q / solution.cost) * (1 + totalFuelSaved / 1000);
             
-            const pheromoneAmount = this.Q / solution.cost;
             for (let i = 0; i < solution.path.length - 1; i++) {
                 const from = solution.path[i];
                 const to = solution.path[i + 1];
@@ -213,43 +194,53 @@ class AntColonyOptimization {
     }
 
     async optimize() {
+        const solutions = [];
+        
         for (let iteration = 0; iteration < this.iterations; iteration++) {
-            const solutions = [];
-            
-            // Her karınca için çözüm oluştur
             for (let ant = 0; ant < this.numAnts; ant++) {
                 const solution = this.constructSolution();
-                if (solution) solutions.push(solution);
-            }
-
-            // En iyi çözümü güncelle
-            const bestIteration = solutions.reduce((best, current) => 
-                !best || current.cost < best.cost ? current : best, null);
-
-            if (bestIteration && (!this.bestSolution || bestIteration.cost < this.bestCost)) {
-                this.bestSolution = bestIteration.path;
-                this.bestCost = bestIteration.cost;
-                this.bestFuelStates = bestIteration.fuelStates; // Yakıt durumlarını sakla
-                
-                if (this.onNewBestSolution) {
-                    this.onNewBestSolution({
-                        iteration,
-                        solution: this.bestSolution,
-                        cost: this.bestCost,
-                        fuelStates: this.bestFuelStates
-                    });
+                if (solution) {
+                    solutions.push(solution);
+                    
+                    console.log(`\nIterasyon ${iteration + 1}, Karınca ${ant + 1}`);
+                    console.log(`Roket Yakıtı: ${solution.fuelStates.reduce((acc, fuel) => acc + fuel, 0).toFixed(1)}`);
+                    console.log(`Uyduların Yakıt Durumları: ${solution.fuelStates.map(f => f.toFixed(1)).join(', ')}`);
+                    console.log(`Path: ${solution.path.join(' -> ')}`);
+                } else {
+                    console.log(`Iterasyon ${iteration + 1}, Karınca ${ant + 1}: Geçerli bir çözüm bulunamadı.`);
                 }
             }
 
-            // Feromonları güncelle
             this.updatePheromones(solutions);
+
+            await new Promise(resolve => setTimeout(resolve, 10));
         }
 
+        const bestSolution = solutions.reduce((best, current) => 
+            !best || current.cost < best.cost ? current : best, null);
+
         return {
-            solution: this.bestSolution,
-            cost: this.bestCost,
-            fuelStates: this.bestFuelStates // Saklanan yakıt durumlarını kullan
+            solution: bestSolution ? bestSolution.path : null,
+            cost: bestSolution ? bestSolution.cost : Infinity,
+            fuelStates: bestSolution ? bestSolution.fuelStates : null
         };
+    }
+
+    calculateDynamicDistance(pos1, pos2) {
+        return Math.sqrt(
+            Math.pow(pos2.x - pos1.x, 2) +
+            Math.pow(pos2.y - pos1.y, 2) +
+            Math.pow(pos2.z - pos1.z, 2)
+        );
+    }
+
+    calculateTransferTime(pos1, pos2) {
+        const distance = this.calculateDynamicDistance(pos1, pos2);
+        const mu = 3.986e14; // Dünya'nın standart gravitasyonel parametresi
+        const r1 = Math.sqrt(pos1.x * pos1.x + pos1.y * pos1.y + pos1.z * pos1.z);
+        const r2 = Math.sqrt(pos2.x * pos2.x + pos2.y * pos2.y + pos2.z * pos2.z);
+        const a = (r1 + r2) / 2;
+        return Math.PI * Math.sqrt(Math.pow(a, 3) / mu);
     }
 }
 
