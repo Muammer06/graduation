@@ -77,14 +77,15 @@ class AntColonyOptimization:
         return priorities
 
     def construct_solution(self):
-        visited = {0}  # Ay'dan başla
+        visited = set()
         path = [0]
         current_node = 0
         current_fuel = self.rocket.max_fuel
         total_distance = 0
-        elapsed_time = 0  # Geçen süreyi takip et
-
-        # Başlangıç uydu durumlarını kopyala
+        elapsed_time = 0
+        total_fuel_consumed = 0
+        
+        # Başlangıç durumları...
         satellite_states = [{
             'fuel': sat.fuel,
             'position': sat.current_position,
@@ -94,10 +95,7 @@ class AntColonyOptimization:
             'inclination': sat.inclination
         } for sat in self.satellites]
 
-        MIN_FUEL_THRESHOLD = self.rocket.max_fuel * 0.2  # Güvenli dönüş için minimum yakıt
-
-        while len(visited) < self.num_nodes:
-            # Her adımda uydu pozisyonlarını güncelle
+        while len(visited) < self.num_nodes - 1:
             self.update_satellite_states(satellite_states, elapsed_time)
             self.moon.update_position(elapsed_time)
             
@@ -108,90 +106,93 @@ class AntColonyOptimization:
             return_distance = current_pos.distance_to(moon_pos)
             return_fuel_needed = self.rocket.calculate_fuel_consumption(return_distance)
 
+            # Eğer Ay'a dönecek yakıt kalmadıysa, önce Ay'a git
+            if current_fuel < return_fuel_needed and current_node != 0:
+                path.append(0)
+                total_distance += return_distance
+                total_fuel_consumed += current_fuel  # Kalan yakıtı kullan
+                elapsed_time += return_distance / self.rocket.speed
+                current_fuel = self.rocket.max_fuel
+                current_node = 0
+                current_pos = moon_pos
+                continue
+
             # Adayları değerlendir
-            priorities = self.calculate_priorities(
-                satellite_states, 
-                current_node,
-                current_fuel,
-                elapsed_time
-            )
+            priorities = self.calculate_priorities(satellite_states, current_node, current_fuel, elapsed_time)
             candidates = [p for p in priorities if p['index'] + 1 not in visited]
-            
+
             if not candidates:
-                if current_node != 0:  # Ay'da değilsek
-                    path.append(0)  # Ay'a dön
+                if current_node != 0:
+                    path.append(0)
                     total_distance += return_distance
-                    current_fuel = self.rocket.max_fuel  # Ay'da yakıt doldur
-                    elapsed_time += return_distance / self.rocket.speed  # Ay'a dönüş süresi
+                    total_fuel_consumed += return_fuel_needed
+                    elapsed_time += return_distance / self.rocket.speed
                 break
 
-            # Rulet tekerleği seçimi yap
+            # Rulet tekerleği seçimi
             total_score = sum(c['score'] for c in candidates)
             if total_score == 0:
                 probabilities = [1.0 / len(candidates)] * len(candidates)
             else:
                 probabilities = [c['score'] / total_score for c in candidates]
             
-            # Rastgele seçim yap
             selected_index = random.choices(range(len(candidates)), probabilities)[0]
             selected = candidates[selected_index]
             
-            # Seçilen uyduya gitme maliyetini hesapla
+            # Seçilen uyduya gidiş maliyeti
             distance_to_selected = current_pos.distance_to(selected['position'])
             fuel_needed = self.rocket.calculate_fuel_consumption(distance_to_selected)
-            
-            # Yakıt yetmiyorsa Ay üzerinden gitmeyi dene
+
+            # Yakıt kontrolü
             if fuel_needed > current_fuel:
+                # Ay üzerinden gitmeyi dene
                 moon_distance = current_pos.distance_to(moon_pos)
                 moon_to_target = moon_pos.distance_to(selected['position'])
-                total_distance = moon_distance + moon_to_target
-                total_fuel = self.rocket.calculate_fuel_consumption(total_distance)
-                
-                if total_fuel <= self.rocket.max_fuel:
-                    path.append(0)  # Ay'a git
-                    path.append(selected['index'] + 1)  # Hedef uyduya git
-                    total_distance += total_distance
-                    current_fuel = self.rocket.max_fuel - total_fuel
-                    travel_time = total_distance / self.rocket.speed
-                    elapsed_time += travel_time
+                via_moon_distance = moon_distance + moon_to_target
+                via_moon_fuel = self.rocket.calculate_fuel_consumption(via_moon_distance)
+
+                if via_moon_fuel <= self.rocket.max_fuel:
+                    # Önce Ay'a git
+                    path.append(0)
+                    total_distance += moon_distance
+                    total_fuel_consumed += current_fuel
+                    elapsed_time += moon_distance / self.rocket.speed
+                    
+                    # Sonra hedef uyduya git
+                    path.append(selected['index'] + 1)
+                    total_distance += moon_to_target
+                    current_fuel = self.rocket.max_fuel - via_moon_fuel
+                    total_fuel_consumed += via_moon_fuel
+                    elapsed_time += moon_to_target / self.rocket.speed
+                    current_node = selected['index'] + 1
+                    visited.add(current_node)
                 else:
-                    continue  # Bu uyduya gidemiyoruz, başka aday seç
+                    continue  # Bu uyduya gidemiyoruz, başka seç
             else:
-                # Direkt hedefe git
+                # Direkt gidiş mümkün
                 path.append(selected['index'] + 1)
                 total_distance += distance_to_selected
                 current_fuel -= fuel_needed
-                travel_time = distance_to_selected / self.rocket.speed
-                elapsed_time += travel_time
-            
-            current_node = selected['index'] + 1
-            visited.add(current_node)
-
-            # Yakıt kritik seviyedeyse Ay'a dön
-            if current_fuel < MIN_FUEL_THRESHOLD and current_node != 0:
-                return_distance = current_pos.distance_to(moon_pos)
-                return_fuel_needed = self.rocket.calculate_fuel_consumption(return_distance)
-                
-                if current_fuel >= return_fuel_needed:
-                    path.append(0)
-                    total_distance += return_distance
-                    elapsed_time += return_distance / self.rocket.speed
-                    current_fuel = self.rocket.max_fuel
-                    current_node = 0
+                total_fuel_consumed += fuel_needed
+                elapsed_time += distance_to_selected / self.rocket.speed
+                current_node = selected['index'] + 1
+                visited.add(current_node)
 
         # Son konum Ay değilse, Ay'a dön
         if path[-1] != 0:
-            final_pos = self.moon.get_position() if path[-1] == 0 else satellite_states[path[-1] - 1]['position']
+            final_pos = satellite_states[path[-1] - 1]['position']
             final_distance = final_pos.distance_to(moon_pos)
-            path.append(0)
-            total_distance += final_distance
-            elapsed_time += final_distance / self.rocket.speed
+            final_fuel_needed = self.rocket.calculate_fuel_consumption(final_distance)
+            
+            if final_fuel_needed > current_fuel:
+                # Son kez Ay'a dönüş için yakıt doldurmaya git
+                path.append(0)
+                total_distance += final_distance
+                total_fuel_consumed += current_fuel
+                elapsed_time += final_distance / self.rocket.speed
 
-        # Çözüm geçerliliğini kontrol et
-        if total_distance <= 0:
-            return None  # Geçersiz çözüm
-        
-        if len(path) < 3:  # En az Ay -> Uydu -> Ay olmalı
+        # Çözüm geçerliliği kontrolü
+        if total_distance <= 0 or len(path) < 3:
             return None
 
         return {
@@ -199,7 +200,7 @@ class AntColonyOptimization:
             'cost': total_distance,
             'fuel_states': [sat['fuel'] for sat in satellite_states],
             'time_elapsed': elapsed_time,
-            'total_fuel_consumption': self.rocket.max_fuel - current_fuel
+            'total_fuel_consumption': total_fuel_consumed
         }
 
     def update_satellite_states(self, satellite_states, elapsed_time):
@@ -338,19 +339,31 @@ class AntColonyOptimization:
                 if solution['cost'] == 0:
                     continue
                     
-                quality = 1.0 / max(solution['cost'], 1e-10)
-                total_fuel_saved = sum(100 - fuel for fuel in solution['fuel_states'])
-                fuel_factor = 1 + (total_fuel_saved / 1000)
-                time_factor = 1 + (max(solution['time_elapsed'], 1) / 3600)
+                # Kalite hesaplamasını düzelt
+                normalized_cost = solution['cost'] / 1000  # km cinsinden
+                quality = 1.0 / (normalized_cost + 1)  # +1 ekleyerek sıfıra bölünmeyi önle
                 
+                # Yakıt faktörünü normalize et
+                total_fuel_saved = sum(100 - fuel for fuel in solution['fuel_states'])
+                max_possible_fuel_save = 100 * len(solution['fuel_states'])  # Maksimum tasarruf
+                fuel_factor = 1 + (total_fuel_saved / max_possible_fuel_save)  # 1-2 arası değer
+                
+                # Zaman faktörünü normalize et
+                time_hours = solution['time_elapsed'] / 3600
+                time_factor = 1 + (1 / (time_hours + 1))  # Daha kısa süre daha iyi
+                
+                # Feromon miktarını hesapla
                 pheromone_amount = min(
-                    self.Q * quality * fuel_factor / time_factor,
-                    10.0
+                    self.Q * quality * fuel_factor * time_factor,
+                    10.0  # Üst sınır
                 )
                 
-                print(f"\nÇözüm {idx + 1}:")
+                print(f"\nÇözüm {idx + 1} Detayları:")
+                print(f"Maliyet: {normalized_cost:.2f} km")
                 print(f"Kalite: {quality:.6f}")
+                print(f"Yakıt Tasarrufu: {total_fuel_saved:.1f}/{max_possible_fuel_save}")
                 print(f"Yakıt Faktörü: {fuel_factor:.2f}")
+                print(f"Süre: {time_hours:.1f} saat")
                 print(f"Zaman Faktörü: {time_factor:.2f}")
                 print(f"Feromon Miktarı: {pheromone_amount:.2f}")
                 
@@ -360,9 +373,10 @@ class AntColonyOptimization:
                     from_node = path[i]
                     to_node = path[i + 1]
                     old_value = self.pheromones[from_node][to_node]
-                    self.pheromones[from_node][to_node] += pheromone_amount
-                    self.pheromones[to_node][from_node] += pheromone_amount
-                    print(f"Kenar {from_node}->{to_node}: {old_value:.2f} -> {self.pheromones[from_node][to_node]:.2f}")
+                    new_value = old_value + pheromone_amount
+                    self.pheromones[from_node][to_node] = new_value
+                    self.pheromones[to_node][from_node] = new_value  # Simetrik güncelleme
+                    print(f"Kenar {from_node}->{to_node}: {old_value:.2f} -> {new_value:.2f}")
             
             # Feromon sınırlaması
             for i in range(self.num_nodes):
