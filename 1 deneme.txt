@@ -1,0 +1,18 @@
+=== Uydu Yakıt İkmal Görevi Sonuçları ===
+
+Rota: 0 -> 1 -> 6 -> 3 -> 4 -> 7 -> 9 -> 2 -> 8 -> 5 -> 10
+Toplam Mesafe: 938974.14 km
+
+Kullanılan Parametreler:
+------------------------------
+Uydu Sayısı: 10
+Roket Yakıtı: 200000.0
+Zaman Adımı: 3600.0 s
+Karınca Sayısı: 10
+İterasyon Sayısı: 2
+Buharlaşma Oranı: 0.1
+Alpha: 1.0
+Beta: 2.0
+Q: 100.0
+
+Tarih: 2025-01-05 01:56:06

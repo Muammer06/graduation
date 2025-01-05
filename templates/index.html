@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Space Mission Visualization</title>
+    <style>
+        body { 
+            margin: 0; 
+            background-color: #000; 
+            overflow: hidden;
+        }
+        #info-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial;
+            font-size: 14px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        button {
+            background: #1a1a1a;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 8px 15px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #00ff00;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="info-panel">
+        <h2>Uzay Görevi Simülasyonu</h2>
+        <div id="mission-info">
+            Simülasyon Zamanı: 0.0 saat<br>
+        </div>
+        <div id="controls">
+            <button id="start">▶ Başlat</button>
+            <button id="pause">⏸ Duraklat</button>
+            <button id="reset">⟲ Sıfırla</button>
+        </div>
+    </div>
+    <div id="canvas-container"></div>
+    
+    <!-- Three.js ve kontroller -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <!-- Ana simülasyon kodu -->
+    <script src="../static/js/space_simulation.js"></script>
+    
+    <!-- Simülasyon başlatma -->
+    <script>
+        let simulation;
+        
+        // Simülasyon yolu ayarlama fonksiyonu
+        window.setSimulationPath = function(data) {
+            if (simulation) {
+                simulation.setSimulationResult(data);
+            }
+        };
+        
+        // Sayfa yüklendiğinde simülasyonu başlat
+        document.addEventListener('DOMContentLoaded', function() {
+            simulation = new SpaceSimulation();
+            
+            // simulation_data.js dosyasını dinamik olarak yükle
+            const script = document.createElement('script');
+            script.src = 'simulation_data.js';
+            document.body.appendChild(script);
+        });
+    </script>
+</body>
+</html> 
